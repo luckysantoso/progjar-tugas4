@@ -4,92 +4,117 @@ import json
 import logging
 import ssl
 import os
-
-server_address = ('www.its.ac.id', 443)
-server_address = ('www.ietf.org',443)
+import base64
 
 
-def make_socket(destination_address='localhost', port=12000):
+server_address = ('172.16.16.101', 8889)
+
+
+def make_socket(destination_address='localhost', port=8889):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_address = (destination_address, port)
-        logging.warning(f"connecting to {server_address}")
-        sock.connect(server_address)
+        sock.settimeout(120)
+        sock.connect((destination_address, port))
         return sock
     except Exception as ee:
         logging.warning(f"error {str(ee)}")
 
 
-def make_secure_socket(destination_address='localhost', port=10000):
+def make_secure_socket(destination_address='localhost', port=8889):
     try:
-        # get it from https://curl.se/docs/caextract.html
-
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        context.load_verify_locations(os.getcwd() + '/domain.crt')
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_address = (destination_address, port)
-        logging.warning(f"connecting to {server_address}")
-        sock.connect(server_address)
+        sock.connect((destination_address, port))
         secure_socket = context.wrap_socket(sock, server_hostname=destination_address)
-        logging.warning(secure_socket.getpeercert())
         return secure_socket
     except Exception as ee:
         logging.warning(f"error {str(ee)}")
 
 
-
 def send_command(command_str, is_secure=False):
-    alamat_server = server_address[0]
-    port_server = server_address[1]
-    #    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # gunakan fungsi diatas
-    if is_secure == True:
-        sock = make_secure_socket(alamat_server, port_server)
-    else:
-        sock = make_socket(alamat_server, port_server)
+    alamat_server, port_server = server_address
 
-    logging.warning(f"connecting to {server_address}")
+    sock = make_secure_socket(alamat_server, port_server) if is_secure else make_socket(alamat_server, port_server)
+
+    logging.warning(f"sending message:\n{command_str}")
     try:
-        logging.warning(f"sending message ")
         sock.sendall(command_str.encode())
-        logging.warning(command_str)
-        # Look for the response, waiting until socket is done (no more data)
-        data_received = ""  # empty string
-        while True:
-            # socket does not receive all data at once, data comes in part, need to be concatenated at the end of process
-            data = sock.recv(2048)
-            if data:
-                # data is not empty, concat with previous content
-                data_received += data.decode()
-                if "\r\n\r\n" in data_received:
-                    break
-            else:
-                # no more data, stop the process by break
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(2048)
+            if not chunk:
                 break
-        # at this point, data_received (string) will contain all data coming from the socket
-        # to be able to use the data_received as a dict, need to load it using json.loads()
-        hasil = data_received
-        logging.warning("data received from server:")
-        return hasil
+            response += chunk
+
+        header_part, body_part = response.split(b"\r\n\r\n", 1)
+        headers = header_part.decode(errors='ignore').split("\r\n")
+
+        content_length = 0
+        for line in headers:
+            if line.lower().startswith("content-length:"):
+                content_length = int(line.split(":")[1].strip())
+                break
+
+        while len(body_part) < content_length:
+            more = sock.recv(2048)
+            if not more:
+                break
+            body_part += more
+
+        return (header_part + b"\r\n\r\n" + body_part).decode(errors='ignore')
+
     except Exception as ee:
         logging.warning(f"error during data receiving {str(ee)}")
-        return False
+        return ''
+    finally:
+        sock.close()
 
-#> GET / HTTP/1.1
-#> Host: www.its.ac.id
-#> User-Agent: curl/8.7.1
-#> Accept: */*
-#>
 
 if __name__ == '__main__':
-    cmd = f"""GET /rfc/rfc2616.txt HTTP/1.1
-Host: www.ietf.org
-User-Agent: myclient/1.1
-Accept: */*
+    logging.basicConfig(level=logging.WARNING)
 
-"""
-    hasil = send_command(cmd, is_secure=True)
-    print(hasil)
+    print('\n--- LIST DIRECTORY ---')
+    cmd = 'GET /list HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'
+    print(send_command(cmd))
+
+    print('\n--- UPLOAD FILE ---')
+    filepath = 'client_image.jpg'
+    if os.path.isfile(filepath):
+        with open(filepath, 'rb') as f:
+            filedata = f.read()
+        filename = os.path.basename(filepath)
+        filedata_b64 = base64.b64encode(filedata).decode()
+        body = f'filename={filename}&data={filedata_b64}'
+        content_length = len(body.encode())
+
+        upload_request = (
+            f'POST /upload HTTP/1.1\r\n'
+            f'Host: localhost\r\n'
+            f'Content-Length: {content_length}\r\n'
+            f'Content-Type: application/x-www-form-urlencoded\r\n'
+            f'Connection: close\r\n'
+            f'\r\n'
+            f'{body}'
+        )
+
+        print(send_command(upload_request))
+    else:
+        print(f'File {filepath} tidak ditemukan')
+
+    print('\n--- LIST SETELAH UPLOAD ---')
+    print(send_command('GET /list HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'))
+
+    print('\n--- LIHAT FILE ---')
+    print(send_command('GET /deleteDummy.jpg HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'))
+
+    print('\n--- DELETE deleteDummy.jpg ---')
+    delete_response = send_command('GET /delete/deleteDummy.jpg HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+    print(delete_response)
+
+    print('\n--- LIST SETELAH DELETE ---')
+    print(send_command('GET /list HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'))
+
